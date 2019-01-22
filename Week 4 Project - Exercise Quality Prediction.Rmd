@@ -1,0 +1,299 @@
+---
+title: "Prediction of Exercise Execution Quality Using Accelerometer Data"
+author: "Paddy McPhillips"
+date: "21 January 2019"
+output: html_document
+fig_caption: true
+keep_md: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      fig.pos='h',
+                      fig.align='center')
+        #rm(list=ls())
+        library(caret)
+        library(kernlab)
+        library(dplyr)
+        library(ggplot2)
+        library(data.table)
+        library(gbm)
+        library(adabag)
+        library(corrplot)
+        ## Setup the working directory where the data is located
+        setwd("C:/Users/paddy/Documents/Coursera/Assignments/Practical Machine Learning/Week 4/Week 4 Project/")
+```
+
+### Introduction
+
+Today there are many personal activity tracker devices such as the Fitbit, Samsung Gear Fit, Jawbone Up, etc. that capture a large amount of data about personal activity. People regularly quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this investigation, data from accelerometers on the belt, forearm, arm, and dumbell is used from 6 participants to predict the manner in which the barbell lifts were being carried out by them.  
+The data for this analysis was kindly shared by [Groupware@LES](http://groupware.les.inf.puc-rio.br/) and can be found along with more background information [here](http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har).
+
+```{r Get_raw, include=FALSE} 
+        ## More chunk options: echo=TRUE,results='hide',message=FALSE,collapse=TRUE
+        ## Download the raw archive file from the web: 
+        train_fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+        download.file(train_fileUrl, destfile = "./Data/pml-training.csv")
+        test_fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+        download.file(test_fileUrl, destfile = "./Data/pml-testing.csv")
+        dateDownloaded <- date()
+        dateDownloaded
+```
+#### Data Analysis.
+Some analysis of the data show the some of the columns appeared to have some post processing carried out on a per window basis. These variables were excluded from the analysis. There also appeared to be some aggregate values calculated where 'new_window' = 'yes'.  
+In order to determine this analysis was carried out to see NA, blank and  #DIV/0 entries. Columns with 95% values were ruled out.  
+The first 7x columns oc data were also exclued as these included participant names, time data and window label which were not used in this prediction modelling exercise. The resulting training dataset consisted of 19216 rows with 53 variables.
+```{r Get_me training_data, echo=TRUE,results='hide'}
+        ## Load the training data
+                # HAR_train <- read.csv("./Data/pml-training.csv")      # Load in the raw data before any cleaning 
+                ## Take a quick look at the data
+                        # dim(HAR_train)
+                        # summary(HAR_train)    # This data set has a lot of variables so not really useful   
+                        # head(HAR_train,20)    # Take a look at a few rows of this data
+                        # str(HAR_train)
+
+                # ## Check to see how many NAs etc. are in each column        
+                        # na_count <-sapply(HAR_train, function(y) sum(length(which(is.na(y)))))
+                        # na_count <- data.frame(na_count)
+                        # blank_count <- sapply(HAR_train, function(y) sum(y=="",na.rm=FALSE))
+                        # blank_count <- data.frame(blank_count)
+                        # space_count <- sapply(HAR_train, function(y) sum(y==" ",na.rm=FALSE))
+                        # space_count <- data.frame(space_count)
+                        # div0_count <- sapply(HAR_train, function(y) sum(y=="#DIV/0!",na.rm=FALSE))
+                        # div0_count <- data.frame(div0_count)
+                        # isNA_count<-cbind(na_count,blank_count,div0_count,space_count)
+                        # dim(isNA_count)
+                        
+                # ## Check to see which columns have more that 95% NAs
+                #         clean_NA_cols <- colSums(is.na(HAR_train))/nrow(HAR_train) < 0.98
+                #         clean_HAR_train <- HAR_train[,clean_NA_cols]
+
+                ## Clean data
+                        # After inspecting data, flag the types of na.strings that you might want to account for
+                        HAR_train <- read.csv("./Data/pml-training.csv",na.strings=c("NA","NaN", " ","#DIV/0!"))
+                        HAR_train_meas <- HAR_train[,c(1:11,37:49,60:68,84:86,102,113:124,140,151:160)]
+                        # colnames(HAR_train_meas)
+                        dim(HAR_train_meas)
+                        # Other options would include: sep = "", skip = 0
+
+                ## Using dplyr to filter/manipulate
+                        HAR_train_tbl<-tbl_df(HAR_train_meas)
+                        HAR_train_final<-filter(HAR_train_tbl, new_window == "no")
+                
+                        # Free up some memory:
+                        rm(HAR_train)
+                        rm(HAR_train_meas)
+                        rm(HAR_train_tbl)
+                ## Remove the fisrt 7 columns as they do not contain measurements
+                        HAR_train_final<-HAR_train_final[,8:60]
+                        dim(HAR_train_final)
+                
+```
+
+```{r Get_test_data, echo=TRUE,results='hide'}
+                HAR_test <- read.csv("./Data/pml-testing.csv")
+ 
+                ## Take a quick look at the data
+                        dim(HAR_test)
+
+                ## Clean data
+                        # After inspecting data, flag the types of na.strings that you might want to account for
+                        HAR_test <- read.csv("./Data/pml-testing.csv",na.strings=c("NA","NaN", " ","#DIV/0!"))
+                        HAR_test_meas <- HAR_test[,c(1:11,37:49,60:68,84:86,102,113:124,140,151:160)]
+                        #colnames(HAR_test_meas)
+                        #dim(HAR_test_meas)
+                      
+
+                ## Remove the fisrt 7 columns as they do not contain measurements
+                        HAR_test_fin<-HAR_test_meas[,8:60]
+                        dim(HAR_test_fin)
+                        
+                        
+                        # Free up some memory:
+                        rm(HAR_test)
+                        rm(HAR_test_meas)
+ 
+```
+                         
+                        
+### Splitting the training data 
+Once the data was cleaned it was then partitioned to allow some of the dataset to be used for validation of the model accuracy. A 75:25 split was used for this purpose.
+```{r partition data}
+
+inTrain <- createDataPartition(y=HAR_train_final$classe,
+                              p=0.75, list=FALSE)
+training <- HAR_train_final[inTrain,]
+testing <- HAR_train_final[-inTrain,]
+dim(training);dim(testing)
+```
+
+### Data Correlation
+A quick correlation plot was carried out to see if there were some variables that had more correlation than others. Whislt there are pairings which have some highly correlated measured (e.g. gyros_forearm_y vs gyros_dumbbell_*) there is no clear pattern showing any variables that could be simply removed.
+
+
+```{r Variable Correlation, fig.height=8, fig.width=10}
+        corrPlot <- cor(training[, -length(names(training))])
+        corrplot(corrPlot, method="circle", tl.col="black", tl.cex=0.6, tl.srt=70)
+```                       
+
+### Model Selection.
+It was decided to try 3x different training methods using the caret package to determine which might be best:
+* Gradient boosting using *GBM* method
+* Bagging using *treebag* method
+* Random forests using *rf* method
+* Random forests using *rf* method. This time run again with PCA in case there was any overfitting given the large number of variables  
+
+```{r modelfit, echo=TRUE}
+        # library(randomForest)
+        set.seed(33833)
+
+        RFcontrol <- trainControl(method="cv", number=4, verboseIter = FALSE) 
+        
+                        ## To measure time taken:
+                        start.time <- Sys.time()
+                        start.time 
+                        
+        modelfit <- train(classe ~ ., data=training, method="rf", trControl=RFcontrol, prox=TRUE, ntree=100)
+        # modelfit
+        Predict_RF <- predict(modelfit, testing)
+        ConfMat_RF<-confusionMatrix(Predict_RF, as.factor(testing$classe))
+        # ConfMat_RF # To see more detail
+        ConfMat_RF$overall['Accuracy']
+
+        
+                        ## To continue the time measurement
+                        end.time <- Sys.time()
+                        time.taken <- end.time - start.time
+                        time.taken
+
+```
+
+```{r modelfit1, echo=TRUE}
+        # library(randomForest)
+        set.seed(33833)
+
+        RF1control <- trainControl(method="cv", number=4, verboseIter = FALSE) 
+        
+                        ## To measure time taken:
+                        start.time <- Sys.time()
+                        start.time 
+                        
+        modelfit1 <- train(classe ~ ., data=training, method="rf", preProcess = "pca", trControl=RF1control, prox=TRUE, ntree=100)
+        # modelfit
+        Predict_RF1 <- predict(modelfit1, testing)
+        ConfMat_RF1<-confusionMatrix(Predict_RF1, as.factor(testing$classe))
+        # ConfMat_RF # To see more detail
+        ConfMat_RF1$overall['Accuracy']
+
+        
+                        ## To continue the time measurement
+                        end.time <- Sys.time()
+                        time.taken <- end.time - start.time
+                        time.taken
+                        
+```
+
+```{r Garbage clean,echo=FALSE}
+        
+        gc()
+```
+
+```{r modelfit2, echo=TRUE,,results='hide'}
+        # library(gbm)
+        # getModelInfo()$gbm$parameters
+        set.seed(33833)
+
+
+        GBMcontrol <- trainControl(method="repeatedcv", number=4, verboseIter = FALSE, repeats = 1)
+
+                        ## To measure time taken:
+                        start.time <- Sys.time()
+                        start.time         
+ 
+       modelfit2 <- train(classe ~ ., data=training, method="gbm", trControl=GBMcontrol)
+        
+
+    
+                        ## To continue the time measurement
+                        end.time <- Sys.time()
+                        time.taken <- end.time - start.time
+                        time.taken
+ 
+```    
+
+```{r Garbage clean0,echo=FALSE}
+        
+        gc()
+```
+
+
+```{r modelfit2_accuracy}
+        # modelfit1
+        Predict_GBM <- predict(modelfit2, testing)
+        ConfMat_GBM<- confusionMatrix(Predict_GBM, as.factor(testing$classe))
+        # ConfMat_GBM # To see more detail
+        ConfMat_GBM$overall['Accuracy']
+
+```
+
+```{r Garbage clean2,echo=FALSE}
+        
+        gc()
+```
+
+
+```{r modelfit3, echo=TRUE}
+        # library(gbm)
+        # getModelInfo()$gbm$parameters
+        set.seed(33833)
+        
+                        ## To measure time taken:
+                        start.time <- Sys.time()
+                        start.time 
+                        
+        TBcontrol <- trainControl(method="repeatedcv", number=4, verboseIter = FALSE, repeats = 1) 
+        
+ 
+       modelfit3 <- train(classe ~ ., data=training, method="treebag", trControl=TBcontrol)
+
+    
+        # modelfit1
+        Predict_TB <- predict(modelfit3, testing)
+        ConfMat_TB<- confusionMatrix(Predict_GBM, as.factor(testing$classe))
+        # ConfMat_GBM # To see more detail
+        ConfMat_TB$overall['Accuracy']
+        
+
+        
+                        ## To continue the time measurement
+                        end.time <- Sys.time()
+                        end.time
+                        time.taken <- end.time - start.time
+                        time.taken
+           
+         # names(getModelInfo()) # Gives a list of possible training methods in caret
+        #getTree(modelfit$finalModel,k=2) # Use to select a particular tree result   
+```  
+```{r Garbage clean3,echo=FALSE}
+        
+        gc()
+```
+
+
+
+### Exercise Results
+Predicting the test result based on the prediction results. 
+```{r Prediction results, echo=TRUE}
+        ## Carry out similar procedure for test data
+        Predict_RF1 <- predict(modelfit, HAR_test_fin)
+        Predict_RF2 <- predict(modelfit1, HAR_test_fin)
+        Predict_GBM <- predict(modelfit2, HAR_test_fin)
+        Predict_TB <- predict(modelfit3, HAR_test_fin)
+
+        
+        Predict_RF1;Predict_RF2;Predict_GBM;Predict_TB        
+```
+
+### Conclusion
+Whilst the Random Forest (*modelfit* model result *Predict_RF2*) gave the most accurate result, it was interesting to compare the other model results.  It is not surprising given that the accuracy of all of these models was >95% that they generate the same prediction results for the 20x test observations. With this particular test data the results were the same.  
+For practical purposes the Random Foreset model with PCA would be used for selecting the actual prediction results. From this we saw prediction accuracy of X% and out of sampe error rate of Y%.
